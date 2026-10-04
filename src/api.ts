@@ -5,11 +5,32 @@ const ACCESS_KEY = 'sahim.access'
 const REFRESH_KEY = 'sahim.refresh'
 let sessionVersion = 0
 let sessionWrite = Promise.resolve()
+let refreshInFlight: Promise<Session> | null = null
+let sessionExpiredHandler: (() => void) | null = null
 
 export type Session = { user: { id: number; role: string }; accessToken: string; refreshToken: string }
 
 export class ApiError extends Error {
-  constructor(message: string, readonly offline = false) { super(message) }
+  constructor(message: string, readonly offline = false, readonly kind: 'auth' | 'retryable' | 'request' = 'request', readonly code?: string) { super(message) }
+  get retryable() { return this.offline || this.kind === 'retryable' }
+}
+
+export function setSessionExpiredHandler(handler: () => void) {
+  sessionExpiredHandler = handler
+  return () => { if (sessionExpiredHandler === handler) sessionExpiredHandler = null }
+}
+
+async function readGraphQLResponse<T>(response: Response): Promise<T> {
+  const body = await response.json().catch(() => null)
+  const error = body?.errors?.[0]
+  if (error || !response.ok) {
+    const code = error?.extensions?.code
+    const auth = response.status === 401 || code === 'UNAUTHENTICATED'
+    const retryable = response.status === 429 || response.status >= 500 || code === 'RATE_LIMITED' || code === 'INTERNAL_SERVER_ERROR'
+    throw new ApiError(error?.message || `Server unavailable (${response.status})`, false, auth ? 'auth' : retryable ? 'retryable' : 'request', code)
+  }
+  if (!body?.data) throw new ApiError('Server returned an invalid response', false, 'retryable')
+  return body.data as T
 }
 
 async function rawRequest<T>(query: string, variables: Record<string, unknown>, token?: string): Promise<T> {
@@ -20,14 +41,11 @@ async function rawRequest<T>(query: string, variables: Record<string, unknown>, 
   try {
     response = await fetch(API_URL, {
       method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
-      body: JSON.stringify({ query, variables }), signal: controller.signal,
+      body: JSON.stringify({ query, variables, operationName: query.match(/^\s*(?:query|mutation)\s+([_A-Za-z][_0-9A-Za-z]*)/)?.[1] }), signal: controller.signal,
     })
   } catch { throw new ApiError('No connection. Your work is saved on this device.', true) }
   finally { clearTimeout(timeout) }
-  if (!response.ok) throw new ApiError(`Server unavailable (${response.status})`, response.status >= 500)
-  const body = await response.json().catch(() => { throw new ApiError('Server returned an invalid response', true) })
-  if (body.errors?.length) throw new ApiError(body.errors[0].message || 'Request failed')
-  return body.data as T
+  return readGraphQLResponse<T>(response)
 }
 
 export async function saveSession(session: Session, expectedVersion = sessionVersion) {
@@ -59,7 +77,7 @@ export async function clearSession() {
 
 export async function signIn(email: string, password: string): Promise<Session> {
   const result = await rawRequest<{ signIn: Session }>(
-    'mutation($email:String!,$password:String!){signIn(email:$email,password:$password){accessToken refreshToken user{id role}}}',
+    'mutation SahimSignIn($email:String!,$password:String!){signIn(email:$email,password:$password){accessToken refreshToken user{id role}}}',
     { email, password },
   )
   if (result.signIn.user.role !== 'CONTRIBUTOR') throw new ApiError('This account cannot use Sahim')
@@ -67,25 +85,48 @@ export async function signIn(email: string, password: string): Promise<Session> 
   return result.signIn
 }
 
-async function refreshed(session: Session): Promise<Session> {
+async function performRefresh(session: Session): Promise<Session> {
   const version = sessionVersion
   const result = await rawRequest<{ refreshToken: Session }>(
-    'mutation($token:String!){refreshToken(data:$token){accessToken refreshToken user{id role}}}',
+    'mutation SahimRefreshToken($token:String!){refreshToken(data:$token){accessToken refreshToken user{id role}}}',
     { token: session.refreshToken },
   )
   if (version !== sessionVersion) throw new ApiError('Session changed')
-  if (result.refreshToken.user.role !== 'CONTRIBUTOR') throw new ApiError('Account access changed')
+  if (result.refreshToken.user.role !== 'CONTRIBUTOR') throw new ApiError('Account access changed', false, 'auth')
   await saveSession(result.refreshToken, version)
   return result.refreshToken
+}
+
+function refreshed(session: Session): Promise<Session> {
+  if (!refreshInFlight) {
+    const pending = performRefresh(session)
+    refreshInFlight = pending
+    void pending.finally(() => { if (refreshInFlight === pending) refreshInFlight = null }).catch(() => undefined)
+  }
+  return refreshInFlight
+}
+
+async function refreshForRequest(session: Session): Promise<Session> {
+  try {
+    const next = await refreshed(session)
+    Object.assign(session, next)
+    return next
+  } catch (error) {
+    if (error instanceof ApiError && error.kind === 'auth') sessionExpiredHandler?.()
+    throw error
+  }
 }
 
 export async function request<T>(session: Session, query: string, variables: Record<string, unknown> = {}): Promise<T> {
   try { return await rawRequest<T>(query, variables, session.accessToken) }
   catch (error) {
-    if (!(error instanceof ApiError) || error.offline || !/expired|unauthorized|token/i.test(error.message)) throw error
-    const next = await refreshed(session)
-    Object.assign(session, next)
-    return rawRequest<T>(query, variables, next.accessToken)
+    if (!(error instanceof ApiError) || error.kind !== 'auth') throw error
+    const next = await refreshForRequest(session)
+    try { return await rawRequest<T>(query, variables, next.accessToken) }
+    catch (retryError) {
+      if (retryError instanceof ApiError && retryError.kind === 'auth') sessionExpiredHandler?.()
+      throw retryError
+    }
   }
 }
 
@@ -93,7 +134,7 @@ export async function uploadImage(session: Session, uri: string): Promise<string
   const fileName = `sahim-${Date.now()}.jpg`
   const form = () => {
     const data = new FormData()
-    data.append('operations', JSON.stringify({ query: 'mutation($file:File!){uploadSahimPhoto(file:$file){url}}', variables: { file: null } }))
+    data.append('operations', JSON.stringify({ query: 'mutation SahimUploadPhoto($file:File!){uploadSahimPhoto(file:$file){url}}', operationName: 'SahimUploadPhoto', variables: { file: null } }))
     data.append('map', JSON.stringify({ '0': ['variables.file'] }))
     data.append('0', { uri, name: fileName, type: 'image/jpeg' } as any)
     return data
@@ -107,16 +148,17 @@ export async function uploadImage(session: Session, uri: string): Promise<string
     catch { throw new ApiError('No connection. Photo is safe on this device.', true) }
     finally { clearTimeout(timeout) }
   }
-  let response = await send(session.accessToken)
-  let body = await response.json().catch(() => { throw new ApiError('Photo service returned an invalid response', true) })
-  if (response.status === 401 || body.errors?.some((error: { message?: string }) => /expired|unauthorized|token/i.test(error.message || ''))) {
-    const next = await refreshed(session)
-    Object.assign(session, next)
-    response = await send(next.accessToken)
-    body = await response.json().catch(() => { throw new ApiError('Photo service returned an invalid response', true) })
+  try {
+    return (await readGraphQLResponse<{ uploadSahimPhoto: { url: string } }>(await send(session.accessToken))).uploadSahimPhoto.url
+  } catch (error) {
+    if (!(error instanceof ApiError) || error.kind !== 'auth') throw error
+    const next = await refreshForRequest(session)
+    try { return (await readGraphQLResponse<{ uploadSahimPhoto: { url: string } }>(await send(next.accessToken))).uploadSahimPhoto.url }
+    catch (retryError) {
+      if (retryError instanceof ApiError && retryError.kind === 'auth') sessionExpiredHandler?.()
+      throw retryError
+    }
   }
-  if (!response.ok || body.errors?.length) throw new ApiError(body.errors?.[0]?.message || 'Photo upload failed', response.status >= 500)
-  return body.data.uploadSahimPhoto.url
 }
 
 export const API_URL_CONFIGURED = Boolean(API_URL)

@@ -11,19 +11,46 @@
       "bundleIdentifier": "com.shea.sahim",
       "supportsTablet": true,
       "infoPlist": {
-        "NSAppTransportSecurity": { "NSAllowsArbitraryLoads": false },
-        "NSCameraUsageDescription": "Sahim uses the camera to scan product barcodes and photograph packaging."
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": false
+        },
+        "NSCameraUsageDescription": "Sahim uses the camera to scan product barcodes and photograph packaging.",
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
       "package": "com.shea.sahim",
-      "permissions": ["CAMERA"],
-      "adaptiveIcon": { "foregroundImage": "./assets/icon.png", "backgroundColor": "#F8FAF7" }
+      "permissions": [
+        "android.permission.CAMERA"
+      ],
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#F8FAF7"
+      }
     },
     "plugins": [
-      ["expo-camera", { "cameraPermission": "Allow Sahim to scan product barcodes.", "barcodeScannerEnabled": true, "recordAudioAndroid": false }],
-      ["expo-image-picker", { "cameraPermission": "Allow Sahim to photograph product packaging.", "microphonePermission": false }],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Sahim to scan product barcodes.",
+          "barcodeScannerEnabled": true,
+          "recordAudioAndroid": false
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": "Allow Sahim to photograph product packaging.",
+          "microphonePermission": false
+        }
+      ],
       "expo-secure-store"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "899e635d-27c4-4cf0-a496-39d8e0736384"
+      }
+    },
+    "owner": "zikosl"
   }
 }

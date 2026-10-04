@@ -1,7 +1,23 @@
 {
-  "cli": { "version": ">= 15.0.0" },
+  "cli": {
+    "version": ">= 15.0.0",
+    "appVersionSource": "remote"
+  },
   "build": {
-    "preview": { "distribution": "internal", "android": { "buildType": "apk" } },
-    "production": { "autoIncrement": true }
+    "preview": {
+      "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://shea.openzey.com/api/graphql"
+      },
+      "android": {
+        "buildType": "apk"
+      }
+    },
+    "production": {
+      "autoIncrement": true,
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://shea.openzey.com/api/graphql"
+      }
+    }
   }
 }
